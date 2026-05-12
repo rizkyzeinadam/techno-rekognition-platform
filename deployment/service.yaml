@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: techno-backend-service
+  namespace: techno
+  labels:
+    app.kubernetes.io/name: techno-backend
+    app.kubernetes.io/part-of: techno-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: techno-backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 5000
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: techno-frontend-service
+  namespace: techno
+  labels:
+    app.kubernetes.io/name: techno-frontend
+    app.kubernetes.io/part-of: techno-platform
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: techno-frontend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 3000
+    protocol: TCP

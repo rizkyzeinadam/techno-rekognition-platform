@@ -1,0 +1,113 @@
+name: Techno Rekognition CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  BACKEND_ECR_REPOSITORY: techno-rekognition-app
+  FRONTEND_ECR_REPOSITORY: techno-rekognition-frontend
+  EKS_CLUSTER_NAME: techno-eks-cluster
+
+jobs:
+  backend_checks:
+    name: Backend checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend dependencies
+        run: pip install -r app/requirements.txt
+
+      - name: Compile backend
+        run: python -m py_compile app/main.py
+
+  frontend_checks:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Validate frontend server
+        working-directory: frontend
+        run: npm run check
+
+  build_and_deploy:
+    name: Build and deploy images
+    runs-on: ubuntu-latest
+    needs:
+      - backend_checks
+      - frontend_checks
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build backend image
+        run: |
+          docker build -t ${{ env.BACKEND_ECR_REPOSITORY }}:${{ github.sha }} .
+          docker tag ${{ env.BACKEND_ECR_REPOSITORY }}:${{ github.sha }} ${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:latest
+          docker tag ${{ env.BACKEND_ECR_REPOSITORY }}:${{ github.sha }} ${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Build frontend image
+        run: |
+          docker build -t ${{ env.FRONTEND_ECR_REPOSITORY }}:${{ github.sha }} -f frontend/Dockerfile .
+          docker tag ${{ env.FRONTEND_ECR_REPOSITORY }}:${{ github.sha }} ${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:latest
+          docker tag ${{ env.FRONTEND_ECR_REPOSITORY }}:${{ github.sha }} ${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Push backend image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:latest
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Push frontend image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:latest
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Inject AWS account ID into manifests
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          sed -i.bak "s|<AWS_ACCOUNT_ID>|${AWS_ACCOUNT_ID}|g" deployment/deploy.yaml
+
+      - name: Deploy to EKS
+        run: |
+          kubectl apply -f deployment/deploy.yaml
+          kubectl apply -f deployment/service.yaml
+          kubectl rollout status deployment/techno-backend -n techno --timeout=5m
+          kubectl rollout status deployment/techno-frontend -n techno --timeout=5m
